@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Industry – Scanner</title>
+<style>
+body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:0;padding:16px;background:#f7f7f7}
+.card{background:#fff;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.08);padding:16px;margin-bottom:16px}
+button,input{font-size:16px;padding:10px 12px;border-radius:10px;border:1px solid #ddd}
+#log{max-height:40vh;overflow:auto}
+.row{display:flex;gap:8px;align-items:center}
+.ok{color:green}
+.err{color:#b00020}
+.loading{color:#666}
+.success{color:#4caf50}
+.warning{color:#ff9800}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>Industry – Equipment Scanner</h2>
+<div id="uidBox"></div>
+<div id="support"></div>
+</div>
+<div class="card">
+<video id="video" playsinline autoplay muted style="width:100%;border-radius:12px;background:#000"></video>
+<div class="row" style="margin-top:8px">
+<button id="startCam">Start Camera</button>
+<button id="stopCam">Stop</button>
+</div>
+<div class="row" style="margin-top:8px">
+<input id="manual" placeholder="Enter barcode manually" />
+<button id="addManual">Add</button>
+</div>
+</div>
+<div class="card">
+<h3>Scanned Equipment</h3>
+<div id="log"></div>
+<div id="status"></div>
+</div>
+<script>
+const params = new URLSearchParams(location.search);
+const uid = params.get('uid') || 'UNKNOWN';
+const token = params.get('token') || 'RSP505';
+const SCRIPT_BASE = "https://script.google.com/macros/s/AKfycbyEGUR1FRdfk7YMI5OBE2xLlGyZv86cK07ym2Ysjng2Kg0MwkFHF4OCLEy446Isw617/exec";
+
+document.getElementById('uidBox').textContent = "Employee UID: " + uid;
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+let stream = null;
+let detector = ('BarcodeDetector' in window) ? new BarcodeDetector({formats:['ean_13','ean_8','upc_a','upc_e','code_128']}) : null;
+let isScanning = false;
+document.getElementById('support').textContent = detector ? "Camera barcode scan supported ✅" : "Camera barcode scan not supported; use manual entry.";
+
+async function fetchMachine(barcode) {
+  return {name: `Machine_${barcode}`, price: 0}; // Simulating a database lookup with a placeholder
+}
+
+// THIS FUNCTION IS CHANGED TO USE A GET REQUEST
+async function postMachine({name, barcode}) {
+  try {
+    const params = new URLSearchParams({
+      mode: 'postItem',
+      uid: uid,
+      token: token,
+      item: name, // Using item for simplicity in backend logic
+      barcode: barcode
+    });
+    const url = `${SCRIPT_BASE}?${params.toString()}`;
+    
+    const res = await fetch(url);
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const responseText = await res.text();
+    return {ok: responseText.includes("logged"), message: responseText};
+    
+  } catch (error) {
+    console.error('Error posting item:', error);
+    throw error;
+  }
+}
+
+function appendLog(text, cls='') {
+  const p = document.createElement('div');
+  if(cls) p.className = cls;
+  p.textContent = text;
+  logEl.prepend(p);
+  logEl.scrollTop = 0;
+}
+
+async function processBarcode(code) {
+  if (!code || code.trim() === '') {
+    statusEl.textContent = "Invalid barcode";
+    return;
+  }
+
+  statusEl.textContent = "Fetching machine info...";
+  statusEl.className = 'loading';
+  
+  try {
+    const {name} = await fetchMachine(code);
+    appendLog(`+ ${name} [${code}]`, 'ok');
+
+    statusEl.textContent = "Logging usage...";
+    const resp = await postMachine({name, barcode: code});
+
+    if (resp.ok) {
+      statusEl.textContent = "Logged ✓";
+      statusEl.className = 'success';
+    } else {
+      statusEl.textContent = `Error: ${resp.message}`;
+      statusEl.className = 'err';
+      appendLog(`Failed to log: ${resp.message}`, 'err');
+    }
+
+    setTimeout(() => {
+      statusEl.textContent = "Ready";
+      statusEl.className = '';
+    }, 3000);
+  } catch (e) {
+    console.error('Error processing barcode:', e);
+    appendLog(`Logging failed for ${code}: ${e.message}`, 'err');
+    statusEl.textContent = "Logging failed";
+    statusEl.className = 'err';
+
+    setTimeout(() => {
+      statusEl.textContent = "Ready";
+      statusEl.className = '';
+    }, 3000);
+  }
+}
+
+async function startCamera() {
+  if(!detector){
+    statusEl.textContent="BarcodeDetector not supported";
+    statusEl.className = 'warning';
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{
+        facingMode:'environment',
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      }
+    });
+
+    const video = document.getElementById('video');
+    video.srcObject = stream;
+    await video.play();
+
+    isScanning = true;
+    statusEl.textContent = "Camera started - scanning...";
+    statusEl.className = 'loading';
+
+    const scan = async ()=>{
+      if(!stream || !isScanning) return;
+
+      try {
+        const codes = await detector.detect(video);
+        if(codes && codes.length){
+          const code = codes[0].rawValue;
+          if (code && code.trim() !== '') {
+            await processBarcode(code);
+            await new Promise(r=>setTimeout(r, 2000));
+          }
+        }
+      } catch(e){
+        console.error('Scan error:', e);
+      }
+
+      if (isScanning) {
+        requestAnimationFrame(scan);
+      }
+    };
+
+    requestAnimationFrame(scan);
+  } catch (error) {
+    console.error('Camera error:', error);
+    statusEl.textContent = `Camera error: ${error.message}`;
+    statusEl.className = 'err';
+  }
+}
+
+function stopCamera() {
+  isScanning = false;
+  if(stream){
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+    statusEl.textContent = "Camera stopped";
+    statusEl.className = '';
+  }
+}
+
+document.getElementById('startCam').onclick = startCamera;
+document.getElementById('stopCam').onclick = stopCamera;
+document.getElementById('addManual').onclick = async () => {
+  const v = document.getElementById('manual').value.trim();
+  if(!v) return;
+  await processBarcode(v);
+  document.getElementById('manual').value = "";
+};
+
+document.getElementById('manual').addEventListener('keypress', async (e) => {
+  if (e.key === 'Enter') {
+    const v = e.target.value.trim();
+    if(!v) return;
+    await processBarcode(v);
+    e.target.value = "";
+  }
+});
+
+statusEl.textContent = "Ready";
+</script>
+</body>
+</html>
